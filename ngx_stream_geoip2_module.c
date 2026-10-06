@@ -16,6 +16,7 @@
 typedef struct {
     MMDB_s                   mmdb;
     MMDB_lookup_result_s     result;
+    ngx_flag_t               cache_valid;
     time_t                   last_check;
     time_t                   last_change;
     time_t                   check_interval;
@@ -167,14 +168,17 @@ ngx_stream_geoip2_variable(ngx_stream_session_t *s, ngx_stream_variable_value_t 
     }
 
 #if (NGX_HAVE_INET6)
-    if (ngx_memcmp(&address, &database->address, sizeof(address)) != 0) {
+    if (!database->cache_valid
+        || ngx_memcmp(&address, &database->address, sizeof(address)) != 0)
 #else
-    if (address != database->address) {
+    if (!database->cache_valid || address != database->address)
 #endif
+    {
         memcpy(&database->address, &address, sizeof(address));
         database->result = MMDB_lookup_sockaddr(&database->mmdb,
                                                 addr.sockaddr, &mmdb_error);
 
+        database->cache_valid = (mmdb_error == MMDB_SUCCESS);
         if (mmdb_error != MMDB_SUCCESS) {
             goto not_found;
         }
@@ -665,6 +669,8 @@ ngx_stream_geoip2_log_handler(ngx_stream_session_t *s)
         database->last_change = ngx_file_mtime(&fi);
         MMDB_close(&database->mmdb);
         database->mmdb = tmpdb;
+        database->cache_valid = 0;
+        ngx_memzero(&database->result, sizeof(database->result));
 
         ngx_log_error(NGX_LOG_INFO, s->connection->log, 0,
                       "Reload MMDB \"%s\"",

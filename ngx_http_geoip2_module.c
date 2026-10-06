@@ -15,6 +15,7 @@
 typedef struct {
     MMDB_s                   mmdb;
     MMDB_lookup_result_s     result;
+    ngx_flag_t               cache_valid;
     time_t                   last_check;
     time_t                   last_change;
     time_t                   check_interval;
@@ -208,15 +209,17 @@ ngx_http_geoip2_variable(ngx_http_request_t *r, ngx_http_variable_value_t *v,
     }
 
 #if (NGX_HAVE_INET6)
-    if (ngx_memcmp(&address, &database->address, sizeof(address))
-        != 0) {
+    if (!database->cache_valid
+        || ngx_memcmp(&address, &database->address, sizeof(address)) != 0)
 #else
-    if (address != database->address) {
+    if (!database->cache_valid || address != database->address)
 #endif
+    {
         memcpy(&database->address, &address, sizeof(address));
         database->result = MMDB_lookup_sockaddr(&database->mmdb,
                                            addr.sockaddr, &mmdb_error);
 
+        database->cache_valid = (mmdb_error == MMDB_SUCCESS);
         if (mmdb_error != MMDB_SUCCESS) {
             goto not_found;
         }
@@ -711,7 +714,7 @@ ngx_http_geoip2_cleanup(void *data)
 
 
 static ngx_int_t
-ngx_http_geoip2_log_handler(ngx_http_request_t *r)
+ngx_http_geoip2_reload_handler(ngx_http_request_t *r)
 {
     int                      status;
     MMDB_s                   tmpdb;
@@ -721,12 +724,12 @@ ngx_http_geoip2_log_handler(ngx_http_request_t *r)
     ngx_http_geoip2_conf_t  *gcf;
 
     ngx_log_debug0(NGX_LOG_DEBUG_HTTP, r->connection->log, 0,
-                   "geoip2 http log handler");
+                   "geoip2 http reload handler");
 
     gcf = ngx_http_get_module_main_conf(r, ngx_http_geoip2_module);
 
     if (ngx_queue_empty(&gcf->databases)) {
-        return NGX_OK;
+        return NGX_DECLINED;
     }
 
     for (q = ngx_queue_head(&gcf->databases);
@@ -774,13 +777,15 @@ ngx_http_geoip2_log_handler(ngx_http_request_t *r)
         database->last_change = ngx_file_mtime(&fi);
         MMDB_close(&database->mmdb);
         database->mmdb = tmpdb;
+        database->cache_valid = 0;
+        ngx_memzero(&database->result, sizeof(database->result));
 
         ngx_log_error(NGX_LOG_INFO, r->connection->log, 0,
                       "Reload MMDB \"%s\"",
                       database->mmdb.filename);
     }
 
-    return NGX_OK;
+    return NGX_DECLINED;
 }
 
 
@@ -792,12 +797,12 @@ ngx_http_geoip2_init(ngx_conf_t *cf)
 
     cmcf = ngx_http_conf_get_module_main_conf(cf, ngx_http_core_module);
 
-    h = ngx_array_push(&cmcf->phases[NGX_HTTP_LOG_PHASE].handlers);
+    h = ngx_array_push(&cmcf->phases[NGX_HTTP_POST_READ_PHASE].handlers);
     if (h == NULL) {
         return NGX_ERROR;
     }
 
-    *h = ngx_http_geoip2_log_handler;
+    *h = ngx_http_geoip2_reload_handler;
 
     return NGX_OK;
 }
